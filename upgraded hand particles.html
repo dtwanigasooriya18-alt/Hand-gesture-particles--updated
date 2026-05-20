@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cinematic Particle Universe</title>
+
+<style>
+body {
+    margin: 0;
+    overflow: hidden;
+    background: black;
+    font-family: Arial, sans-serif;
+}
+
+canvas {
+    display: block;
+}
+
+#ui {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    color: white;
+    z-index: 10;
+    text-shadow: 0 0 10px cyan;
+}
+
+#ui h1 {
+    margin: 0;
+    font-size: 24px;
+}
+
+#ui p {
+    opacity: 0.8;
+}
+</style>
+</head>
+
+<body>
+
+<div id="ui">
+    <h1>Particle Universe</h1>
+    <p>Pinch = Scale | Move = Rotate | Hand = Morph</p>
+    <p id="current-shape">Current Shape: Torus</p>
+    <p id="brightness-info" style="color: #ffff00; font-size: 12px; margin-top: 10px;">Brightness: ---</p>
+</div>
+
+<canvas id="hand-tracker" style="position: absolute; right: 20px; top: 20px; border: 2px solid cyan; border-radius: 8px; z-index: 15; background: black;"></canvas>
+
+<video id="webcam" autoplay playsinline style="display:none"></video>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+
+import * as THREE from 'three';
+
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+import { HandLandmarker, FilesetResolver }
+from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0';
+
+// SETUP 
+
+const PARTICLE_COUNT = 12000;
+
+let handLandmarker;
+let lastVideoTime = -1;
+let currentShape = 'torus';
+
+// Scene
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(
+    75,
+    window.innerWidth / window.innerHeight,
+    0.1,
+    1000
+);
+
+camera.position.z = 8;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+// BLOOM
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloom = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    1.5,
+    1,
+    0.2
+);
+
+composer.addPass(bloom);
+
+//PARTICLES 
+
+const geometry = new THREE.BufferGeometry();
+
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+const velocity = new Float32Array(PARTICLE_COUNT * 3);
+const colors = new Float32Array(PARTICLE_COUNT * 3);
+
+// initial scatter
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+
+    positions[i * 3] = (Math.random() - 0.5) * 20;
+    positions[i * 3 + 1] = (Math.random() - 0.5) * 20;
+    positions[i * 3 + 2] = (Math.random() - 0.5) * 20;
+
+    colors[i * 3] = 0.2;
+    colors[i * 3 + 1] = 0.8;
+    colors[i * 3 + 2] = 1.0;
+}
+
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const material = new THREE.PointsMaterial({
+    size: 0.04,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.9,
+    blending: THREE.AdditiveBlending
+});
+
+const particles = new THREE.Points(geometry, material);
+scene.add(particles);
+
+// SHAPES 
+
+function createTorus() {
+
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+
+        const u = Math.random() * Math.PI * 2;
+        const v = Math.random() * Math.PI * 2;
+
+        const R = 2.5;
+        const r = 1;
+
+        targetPositions[i * 3] =
+            (R + r * Math.cos(v)) * Math.cos(u);
+
+        targetPositions[i * 3 + 1] =
+            (R + r * Math.cos(v)) * Math.sin(u);
+
+        targetPositions[i * 3 + 2] =
+            r * Math.sin(v);
+    }
+}
+
+function createGalaxy() {
+
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+
+        const radius = Math.random() * 5;
+        const angle = radius * 2;
+        const spin = radius * 1.5;
+
+        targetPositions[i * 3] =
+            Math.cos(angle + spin) * radius;
+
+        targetPositions[i * 3 + 1] =
+            (Math.random() - 0.5) * 0.5;
+
+        targetPositions[i * 3 + 2] =
+            Math.sin(angle + spin) * radius;
+    }
+}
+
+createTorus();
+
+//HAND TRACKING 
+
+async function init() {
+
+    const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+    );
+
+    handLandmarker = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+            modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+        },
+        runningMode: "VIDEO",
+        numHands: 2
+    });
+
+    const video = document.getElementById("webcam");
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+
+    video.srcObject = stream;
+
+    video.addEventListener("loadeddata", predict);
+}
+
+async function predict() {
+
+    const video = document.getElementById("webcam");
+    const canvas = document.getElementById("hand-tracker");
+    const ctx = canvas.getContext('2d');
+
+    if (video.currentTime !== lastVideoTime) {
+
+        lastVideoTime = video.currentTime;
+
+        const result = handLandmarker.detectForVideo(
+            video,
+            performance.now()
+        );
+
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+            canvas.width = video.videoWidth * 0.25;
+            canvas.height = video.videoHeight * 0.25;
+        }
+
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const connections = [
+            [0, 1], [1, 2], [2, 3], [3, 4],
+            [5, 6], [6, 7], [7, 8],
+            [9, 10], [10, 11], [11, 12],
+            [13, 14], [14, 15], [15, 16],
+            [17, 18], [18, 19], [19, 20],
+            [0, 5], [5, 9], [9, 13], [13, 17], [0, 17]
+        ];
+
+        let fingersUp = 0;
+
+        if (result.landmarks?.length) {
+            result.landmarks.forEach((landmarks, handIdx) => {
+                const scaleX = canvas.width / video.videoWidth;
+                const scaleY = canvas.height / video.videoHeight;
+
+                ctx.strokeStyle = handIdx === 0 ? '#4fc3ff' : '#ff69b4';
+                ctx.fillStyle = handIdx === 0 ? '#4fc3ff' : '#ff69b4';
+                ctx.lineWidth = 2;
+
+                connections.forEach(([start, end]) => {
+                    const p1 = landmarks[start];
+                    const p2 = landmarks[end];
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x * canvas.width, p1.y * canvas.height);
+                    ctx.lineTo(p2.x * canvas.width, p2.y * canvas.height);
+                    ctx.stroke();
+                });
+
+                landmarks.forEach((landmark, idx) => {
+                    ctx.beginPath();
+                    ctx.arc(landmark.x * canvas.width, landmark.y * canvas.height, 3, 0, 2 * Math.PI);
+                    ctx.fill();
+                });
+
+                if (handIdx === 0) {
+                    updateGesture(landmarks);
+                } else if (handIdx === 1) {
+                    fingersUp = countExtendedFingers(landmarks);
+                }
+            });
+        }
+
+        updateParticleBrightness(fingersUp);
+    }
+
+    requestAnimationFrame(predict);
+}
+
+function countExtendedFingers(landmarks) {
+    let count = 0;
+
+    const tipIndices = [4, 8, 12, 16, 20];
+    const pipIndices = [3, 7, 11, 15, 19];
+
+    for (let i = 0; i < tipIndices.length; i++) {
+        const tip = landmarks[tipIndices[i]];
+        const pip = landmarks[pipIndices[i]];
+
+        if (tip.y < pip.y) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+function updateParticleBrightness(fingerCount) {
+    let opacity = 0.3;
+    let brightnessLabel = '---';
+
+    if (fingerCount === 1) {
+        opacity = 0.3;
+        brightnessLabel = 'Low';
+    } else if (fingerCount === 2) {
+        opacity = 0.6;
+        brightnessLabel = 'Medium';
+    } else if (fingerCount >= 3) {
+        opacity = 0.95;
+        brightnessLabel = 'High';
+    }
+
+    material.opacity = opacity;
+    document.getElementById('brightness-info').innerText = 'Brightness: ' + brightnessLabel + ' (' + fingerCount + ' fingers)';
+}
+
+// GESTURES 
+
+function updateGesture(landmarks) {
+
+    const thumb = landmarks[4];
+    const index = landmarks[8];
+
+    const dist = Math.hypot(
+        thumb.x - index.x,
+        thumb.y - index.y
+    );
+
+    const scale = THREE.MathUtils.mapLinear(dist, 0.05, 0.3, 0.7, 2.5);
+    particles.scale.set(scale, scale, scale);
+
+    const palm = landmarks[9];
+
+    particles.rotation.y = (palm.x - 0.5) * 5;
+    particles.rotation.x = (palm.y - 0.5) * 5;
+
+    // switch shapes
+    if (palm.y < 0.45 && currentShape !== 'galaxy') {
+
+        createGalaxy();
+        currentShape = 'galaxy';
+
+        document.getElementById("current-shape").innerText =
+            "Current Shape: Galaxy";
+
+    } else if (palm.y >= 0.45 && currentShape !== 'torus') {
+
+        createTorus();
+        currentShape = 'torus';
+
+        document.getElementById("current-shape").innerText =
+            "Current Shape: Torus";
+    }
+
+    material.color.setHSL(dist * 2, 1, 0.6);
+}
+
+// ANIMATION
+
+function animate() {
+
+    const pos = geometry.attributes.position.array;
+
+    for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+
+        const force = (targetPositions[i] - pos[i]) * 0.002;
+
+        velocity[i] += force;
+        velocity[i] *= 0.96;
+
+        pos[i] += velocity[i];
+    }
+
+    geometry.attributes.position.needsUpdate = true;
+
+    particles.rotation.z += 0.001;
+
+    composer.render();
+    requestAnimationFrame(animate);
+}
+
+init();
+animate();
+
+// resize
+window.addEventListener("resize", () => {
+
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+</script>
+
+</body>
+</html>
